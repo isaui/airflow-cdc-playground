@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  # MinIO for CDC state storage
+  minio:
+    image: minio/minio:latest
+    container_name: cdc-minio
+    ports:
+      - "9000:9000"      # MinIO API port
+      - "9001:9001"      # MinIO Console port
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - airflow-network
+
+  # Create the initial bucket when MinIO starts
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Waiting for MinIO to be ready...';
+      until /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin; do
+        echo 'MinIO not ready yet, retrying in 2 seconds...';
+        sleep 2;
+      done;
+      echo 'Creating cdc-state bucket...';
+      /usr/bin/mc mb myminio/cdc-state --ignore-existing;
+      echo 'Setting bucket policy...';
+      /usr/bin/mc anonymous set download myminio/cdc-state;
+      echo 'Bucket setup complete.';
+      "
+    networks:
+      - airflow-network
+
+  # Airflow components
+  postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    networks:
+      - airflow-network
+
+  # Single Airflow container
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__WEBSERVER__SECRET_KEY=secret
+    volumes:
+      - ./:/opt/airflow  # Mount the entire project directory directly
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "
+      echo 'Waiting for Postgres to be ready...' &&
+      while ! pg_isready -h postgres -p 5432 -U airflow; do
+        sleep 2
+      done &&
+      echo 'Initializing Airflow database...' &&
+      airflow db init &&
+      echo 'Creating admin user...' &&
+      airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
+      echo 'Admin user created successfully!' &&
+      echo 'Starting Airflow scheduler and webserver...' &&
+      airflow scheduler & airflow webserver"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - airflow-network
+
+volumes:
+  minio_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  airflow-network:
+    driver: bridge

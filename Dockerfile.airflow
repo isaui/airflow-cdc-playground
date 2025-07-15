@@ -1,0 +1,16 @@
+FROM apache/airflow:2.7.1
+
+USER root
+
+# Set proper permissions for directories
+RUN mkdir -p /opt/airflow/logs /opt/airflow/dags && \
+    chmod -R 777 /opt/airflow/logs /opt/airflow/dags
+
+# Copy requirements file
+COPY requirements.txt /requirements.txt
+
+# Switch to airflow user for pip install
+USER airflow
+
+# Install dependencies
+RUN pip install --no-cache-dir -r /requirements.txt

@@ -1,0 +1,14 @@
+sqlalchemy>=1.4.24,<2.0
+pymysql>=1.0.3
+psycopg2-binary>=2.9.6
+minio>=7.1.15
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+click>=8.1.0
+rich>=13.4.0
+pandas>=2.0.0
+
+# Airflow dependencies
+apache-airflow>=2.7.1
+apache-airflow-providers-celery>=3.3.0
+redis>=4.5.0
