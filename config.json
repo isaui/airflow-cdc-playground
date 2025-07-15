@@ -27,7 +27,7 @@
     }
   },
   "tables": {
-    "homepage_book": {
+    "Homepage_book": {
       "datasource": "railway_mysql",
       "schema": "railway",
       "primary_key": "id",
