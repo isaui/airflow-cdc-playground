@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class HashPartitionCDCStrategy(CDCStrategy):
-    """CDC strategy using hash-partition method for large tables."""
+    """CDC strategy using hash-partition method for large tables with backend hash calculation."""
     
     def process(self, table_name: str, table_config: Dict[str, Any], datasource_name: str) -> Dict[str, Any]:
         """Process a table using hash-partition CDC method.
@@ -31,8 +31,12 @@ class HashPartitionCDCStrategy(CDCStrategy):
         if not primary_key:
             return {"status": "error", "message": "No primary key specified"}
             
-        # Get total count to determine partitions
-        count_query = f"SELECT COUNT(*) as count FROM {table_name}"
+        # Get total count to determine partitions - SIMPLE COUNT query
+        table_config_obj = self.db_manager.get_table_config(table_name)
+        schema = table_config_obj.get("schema", "") if table_config_obj else ""
+        qualified_table_name = f"{schema}.{table_name}" if schema else table_name
+        
+        count_query = f"SELECT COUNT(*) as count FROM {qualified_table_name}"
         result = self.db_manager.execute_query(datasource_name, count_query)
         row = result.fetchone()
         total_rows = row[0] if row else 0
@@ -104,13 +108,14 @@ class HashPartitionCDCStrategy(CDCStrategy):
         previous_state = self.storage_manager.retrieve_state(state_key)
         previous_hashes = previous_state.get("row_hashes", {}) if previous_state else {}
         
-        # Build the partition query
-        columns_str = ", ".join([f"\"{col}\"" for col in hash_columns])
-        partition_clause = f"MOD(ABS(CAST(COALESCE(\"{primary_key}\", '0') AS INTEGER)), {total_partitions}) = {partition_id}"
+        # Get table config for schema
+        table_config_obj = self.db_manager.get_table_config(table_name)
+        schema = table_config_obj.get("schema", "") if table_config_obj else ""
+        qualified_table_name = f"{schema}.{table_name}" if schema else table_name
         
-        # For simplicity, we'll create a query that works for both PostgreSQL and MySQL
-        # In production, you might want to optimize this for each database type
-        query = f"SELECT * FROM {table_name} WHERE {partition_clause}"
+        # Build partition query - SIMPLE SELECT * dengan WHERE partition clause
+        partition_clause = f"MOD(ABS(CAST(COALESCE({primary_key}, 0) AS INTEGER)), {total_partitions}) = {partition_id}"
+        query = f"SELECT * FROM {qualified_table_name} WHERE {partition_clause}"
         
         # Process current data
         current_hashes = {}
@@ -120,28 +125,20 @@ class HashPartitionCDCStrategy(CDCStrategy):
             "deleted": []
         }
         
+        # Execute simple SELECT query
         result = self.db_manager.execute_query(datasource_name, query)
+        
+        # Process rows dan calculate hash di BACKEND (bukan di database)
         for row in result:
-            row_dict = dict(row)
+            row_dict = dict(row._mapping) if hasattr(row, '_mapping') else dict(row)
             pk_value = str(row_dict.get(primary_key, ""))
             
             if not pk_value:
                 logger.warning(f"Row missing primary key value: {row_dict}")
                 continue
             
-            # Create hash from specified columns
-            hash_values = []
-            
-            # Special case: if hash_columns contains "*", use all columns
-            if "*" in hash_columns:
-                for col, val in sorted(row_dict.items()):
-                    hash_values.append(str(val or ""))
-            else:
-                for col in hash_columns:
-                    if col in row_dict:
-                        hash_values.append(str(row_dict.get(col, "")))
-            
-            row_hash = hashlib.md5("|".join(hash_values).encode()).hexdigest()
+            # Hash calculation di BACKEND - bukan di database
+            row_hash = self._calculate_row_hash(row_dict, hash_columns)
             current_hashes[pk_value] = row_hash
             
             # Compare with previous hash
@@ -164,3 +161,34 @@ class HashPartitionCDCStrategy(CDCStrategy):
         self.storage_manager.store_state(state_key, new_state)
         
         return changes
+    
+    def _calculate_row_hash(self, row_dict: Dict[str, Any], hash_columns: list) -> str:
+        """Calculate hash value for a row based on specified columns.
+        
+        IMPORTANT: Hash calculation dilakukan di BACKEND (Python level), 
+        bukan di database level untuk menghindari query yang berat.
+        
+        Args:
+            row_dict: Row data as dictionary
+            hash_columns: List of column names to include in hash
+            
+        Returns:
+            Hash string
+        """
+        hash_values = []
+        
+        # Special case: if hash_columns contains "*", use all columns
+        if "*" in hash_columns:
+            for col, val in sorted(row_dict.items()):
+                # Convert to string and handle None values
+                hash_values.append(str(val if val is not None else ""))
+        else:
+            for col in hash_columns:
+                if col in row_dict:
+                    # Convert to string and handle None values
+                    val = row_dict.get(col)
+                    hash_values.append(str(val if val is not None else ""))
+        
+        # Join with delimiter and calculate MD5 hash di BACKEND
+        hash_string = "|".join(hash_values)
+        return hashlib.md5(hash_string.encode('utf-8')).hexdigest()

@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine, Connection
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    """Database manager for CDC operations using SQLAlchemy."""
+    """Database manager for CDC operations using SQLAlchemy with simple SELECT queries."""
     
     def __init__(self, config_path: str):
         """Initialize the database manager with configuration.
@@ -85,7 +85,8 @@ class DatabaseManager:
         batch_size: Optional[int] = None,
         where_clause: Optional[str] = None
     ) -> Generator[pd.DataFrame, None, None]:
-        """Fetch data from table in batches using pandas."""
+        """Fetch data from table in batches using pandas with SIMPLE SELECT queries.
+        """
         if batch_size is None:
             batch_size = self.global_settings.get("batch_size", 10000)
             
@@ -101,29 +102,45 @@ class DatabaseManager:
         # Build fully qualified table name with schema if present
         qualified_table_name = f"{schema}.{table_name}" if schema else table_name
         
+        # SIMPLE SELECT * query - no computation di database level
         query = f"SELECT * FROM {qualified_table_name}"
         if where_clause:
             query += f" WHERE {where_clause}"
             
         logger.info(f"Fetching data from {datasource_name}.{qualified_table_name} in batches of {batch_size}")
+        logger.info(f"Query: {query}")
         
-        # Use pandas to handle the batching
-        for chunk in pd.read_sql(query, engine, chunksize=batch_size):
-            yield chunk
+        # Use pandas to handle the batching - pandas akan handle chunking
+        try:
+            for chunk in pd.read_sql(query, engine, chunksize=batch_size):
+                yield chunk
+        except Exception as e:
+            logger.error(f"Error fetching data: {str(e)}")
+            raise
             
     def execute_query(self, datasource_name: str, query: str, params: Optional[Dict] = None) -> Any:
-        """Execute a raw SQL query on the datasource."""
+        """Execute a raw SQL query on the datasource.
+        
+        IMPORTANT: Pastikan query yang dijalankan adalah query sederhana
+        untuk menghindari beban berlebih di database.
+        """
         engine = self.engines.get(datasource_name)
         if not engine:
             logger.error(f"Datasource {datasource_name} not found")
             return None
             
+        logger.info(f"Executing query on {datasource_name}: {query}")
+        
         with engine.connect() as conn:
-            if params:
-                result = conn.execute(text(query), params)
-            else:
-                result = conn.execute(text(query))
-            return result
+            try:
+                if params:
+                    result = conn.execute(text(query), params)
+                else:
+                    result = conn.execute(text(query))
+                return result
+            except Exception as e:
+                logger.error(f"Error executing query: {str(e)}")
+                raise
     
     def get_table_config(self, table_name: str) -> Optional[Dict[str, Any]]:
         """Get configuration for a specific table."""
