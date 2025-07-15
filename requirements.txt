@@ -8,6 +8,10 @@ click>=8.1.0
 rich>=13.4.0
 pandas>=2.0.0
 
+# Storage format support
+pyarrow>=10.0.0      # For Parquet files
+fastparquet>=0.8.3   # Alternative Parquet engine
+
 # Airflow dependencies
 apache-airflow>=2.7.1
 apache-airflow-providers-celery>=3.3.0

@@ -1,8 +1,11 @@
 import logging
 import json
 from typing import Dict, Any, Optional, List
+
 from minio import Minio
 from minio.error import S3Error
+
+from utils.formats import FORMAT_HANDLERS
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,31 @@ class StorageManager:
         except S3Error as e:
             logger.error(f"Error checking/creating bucket {bucket}: {str(e)}")
     
+    def _get_format_handler(self, state_key: str):
+        """Get the appropriate format handler based on configuration."""
+        # Check if this is a snapshot and has table-specific format preference
+        table_format = None
+        if "/snapshot" in state_key:
+            # Extract table name from state_key (format: datasource/table_name/snapshot)
+            parts = state_key.split("/")
+            if len(parts) >= 2:
+                table_name = parts[1]
+                tables_config = self.config.get("tables", {})
+                if table_name in tables_config and "snapshot_format" in tables_config[table_name]:
+                    table_format = tables_config[table_name]["snapshot_format"].lower()
+                    logger.info(f"Using table-specific format {table_format} for {state_key}")
+        
+        # Get format type (default is JSON)
+        format_type = table_format or self.storage_config.get("format", "json").lower()
+        
+        # Return appropriate handler
+        handler_class = FORMAT_HANDLERS.get(format_type)
+        if not handler_class:
+            logger.warning(f"Unknown format type: {format_type}, falling back to JSON")
+            handler_class = FORMAT_HANDLERS["json"]
+            
+        return handler_class
+    
     def store_state(self, state_key: str, data: Dict[str, Any]) -> bool:
         """Store CDC state data in MinIO.
         
@@ -92,28 +120,45 @@ class StorageManager:
         if not bucket:
             logger.error("Bucket name not specified in configuration")
             return False
-            
+        
+        # Get appropriate format handler
+        handler = self._get_format_handler(state_key)
+        logger.info(f"Using {handler.__name__} for storing state {state_key}")
+        
         try:
-            format_type = self.storage_config.get("format", "json").lower()
+            # Store the data using the format handler
+            result = handler.store(data)
             
-            if format_type == "json":
-                data_str = json.dumps(data)
-                data_bytes = data_str.encode('utf-8')
+            # Unpack the results - main data stream, size, content type, and optional metadata
+            if len(result) == 4 and result[3] is not None:
+                data_stream, data_size, content_type, metadata_tuple = result
+                metadata_stream, metadata_size = metadata_tuple
                 
+                # Store metadata
+                metadata_key = f"{state_key}_metadata"
                 self.client.put_object(
                     bucket,
-                    state_key,
-                    data=data_bytes,
-                    length=len(data_bytes),
+                    metadata_key,
+                    data=metadata_stream,
+                    length=metadata_size,
                     content_type='application/json'
                 )
-                
-                logger.info(f"Stored state at {bucket}/{state_key}")
-                return True
             else:
-                logger.error(f"Unsupported format type: {format_type}")
-                return False
-        except S3Error as e:
+                data_stream, data_size, content_type = result[:3]
+            
+            # Store main data
+            self.client.put_object(
+                bucket,
+                state_key,
+                data=data_stream,
+                length=data_size,
+                content_type=content_type
+            )
+            
+            logger.info(f"Stored state at {bucket}/{state_key}")
+            return True
+            
+        except Exception as e:
             logger.error(f"Error storing state at {bucket}/{state_key}: {str(e)}")
             return False
     
@@ -134,20 +179,32 @@ class StorageManager:
         if not bucket:
             logger.error("Bucket name not specified in configuration")
             return None
-            
+        
+        # Get appropriate format handler
+        handler = self._get_format_handler(state_key)
+        
         try:
+            # Check if this format uses metadata
+            metadata_bytes = None
+            try:
+                metadata_key = f"{state_key}_metadata"
+                metadata_response = self.client.get_object(bucket, metadata_key)
+                metadata_bytes = metadata_response.read()
+                metadata_response.close()
+                metadata_response.release_conn()
+            except S3Error as e:
+                if "NoSuchKey" not in str(e):
+                    raise
+            
+            # Get main data
             response = self.client.get_object(bucket, state_key)
-            data_str = response.read().decode('utf-8')
+            data_bytes = response.read()
             response.close()
             response.release_conn()
             
-            format_type = self.storage_config.get("format", "json").lower()
-            
-            if format_type == "json":
-                return json.loads(data_str)
-            else:
-                logger.error(f"Unsupported format type: {format_type}")
-                return None
+            # Use handler to retrieve data
+            return handler.retrieve(data_bytes, metadata_bytes=metadata_bytes)
+                
         except S3Error as e:
             if "NoSuchKey" in str(e):
                 logger.info(f"No state found at {bucket}/{state_key}")
@@ -175,7 +232,8 @@ class StorageManager:
             
         try:
             objects = self.client.list_objects(bucket, prefix=prefix, recursive=True)
-            return [obj.object_name for obj in objects]
+            # Filter out metadata files
+            return [obj.object_name for obj in objects if not obj.object_name.endswith("_metadata")]
         except S3Error as e:
             logger.error(f"Error listing states with prefix {prefix}: {str(e)}")
             return []
@@ -199,9 +257,96 @@ class StorageManager:
             return False
             
         try:
+            # Delete main object
             self.client.remove_object(bucket, state_key)
             logger.info(f"Deleted state at {bucket}/{state_key}")
+            
+            # Try to delete metadata if it exists
+            try:
+                metadata_key = f"{state_key}_metadata"
+                self.client.remove_object(bucket, metadata_key)
+                logger.info(f"Deleted metadata at {bucket}/{metadata_key}")
+            except S3Error as e:
+                if "NoSuchKey" not in str(e):
+                    logger.warning(f"Error deleting metadata: {str(e)}")
+            
             return True
         except S3Error as e:
             logger.error(f"Error deleting state at {bucket}/{state_key}: {str(e)}")
+            return False
+            
+    def store_snapshot(self, file_path: str, data: Dict[str, Any], content_type: str = None) -> bool:
+        """Store snapshot data using the appropriate format handler.
+        
+        Args:
+            file_path: Path/key to store the snapshot at
+            data: Data to store
+            content_type: Optional content type override
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.client:
+            logger.error("MinIO client not initialized")
+            return False
+            
+        bucket = self.storage_config.get("bucket")
+        if not bucket:
+            logger.error("Bucket name not specified in configuration")
+            return False
+            
+        # Determine the format from the file extension
+        format_type = "json"  # Default
+        if "." in file_path:
+            extension = file_path.split(".")[-1].lower()
+            if extension in ["json", "parquet", "csv"]:
+                format_type = extension
+                
+        # Get the appropriate format handler
+        handler_class = FORMAT_HANDLERS.get(format_type)
+        if not handler_class:
+            logger.warning(f"Unknown format type: {format_type}, falling back to JSON")
+            handler_class = FORMAT_HANDLERS["json"]
+            
+        logger.info(f"Using {handler_class.__name__} for storing snapshot at {file_path}")
+        
+        try:
+            # Store the data using the format handler
+            result = handler_class.store(data)
+            
+            # Unpack the results - main data stream, size, content type, and optional metadata
+            if len(result) == 4 and result[3] is not None:
+                data_stream, data_size, default_content_type, metadata_tuple = result
+                metadata_stream, metadata_size = metadata_tuple
+                
+                # Store metadata
+                metadata_path = f"{file_path}_metadata"
+                self.client.put_object(
+                    bucket,
+                    metadata_path,
+                    data=metadata_stream,
+                    length=metadata_size,
+                    content_type='application/json'
+                )
+                logger.info(f"Stored snapshot metadata at {bucket}/{metadata_path}")
+            else:
+                data_stream, data_size, default_content_type = result[:3]
+            
+            # Use provided content type or default from format handler
+            content_type = content_type or default_content_type
+            
+            # Store main data
+            self.client.put_object(
+                bucket,
+                file_path,
+                data=data_stream,
+                length=data_size,
+                content_type=content_type
+            )
+            
+            logger.info(f"Stored snapshot at {bucket}/{file_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error storing snapshot at {bucket}/{file_path}: {str(e)}")
             return False

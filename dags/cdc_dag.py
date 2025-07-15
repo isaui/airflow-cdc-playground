@@ -7,12 +7,11 @@ This DAG uses the CDC Python operator to process tables based on global configur
 import os
 import sys
 import json
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
-from airflow.utils.dates import days_ago
 
 # Import CDC modules - assuming the project is mounted at /opt/airflow
 sys.path.append('/opt/airflow')
@@ -61,8 +60,8 @@ dag = DAG(
     'cdc_snapshot_diff',
     default_args=default_args,
     description='Run CDC operations on configured tables',
-    schedule_interval=timedelta(seconds=interval_seconds),
-    start_date=days_ago(1),
+    schedule=timedelta(seconds=interval_seconds),
+    start_date=datetime.now() - timedelta(days=1),
     catchup=False,
     tags=['cdc'],
     is_paused_upon_creation=not enabled,

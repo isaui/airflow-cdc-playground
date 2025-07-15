@@ -1,40 +1,47 @@
 {
-    "global_settings": {
-      "batch_size": 10000,
-      "connection_pool": {
-        "pool_size": 5,
-        "max_overflow": 10,
-        "timeout": 30
-      },
-      "scheduling": {
-        "enabled": true,
-        "interval_seconds": 3600,
-        "max_retries": 3,
-        "retry_delay_seconds": 300,
-        "timeout_seconds": 1800
-      }
+  "global_settings": {
+    "batch_size": 10000,
+    "connection_pool": {
+      "pool_size": 5,
+      "max_overflow": 10,
+      "timeout": 30
     },
-    "datasources": {
-      "railway_mysql": {
-        "url": "mysql+pymysql://root:fgeeCC5HFAf2a2eeH4Gf---HhaEA6d33@monorail.proxy.rlwy.net:24497/railway",
-        "type": "mysql"
-      }
+    "scheduling": {
+      "enabled": true,
+      "interval_seconds": 3600,
+      "max_retries": 3,
+      "retry_delay_seconds": 300,
+      "timeout_seconds": 1800
     },
-    "tables": {
-      "homepage_book": {
-        "datasource": "railway_mysql",
-        "schema": "railway",
-        "primary_key": "id",
-        "method": "hash",
-        "hash_columns": ["*"]
-      }
-    },
-    "storage": {
-      "endpoint": "minio:9000",
-      "access_key": "minioadmin",
-      "secret_key": "minioadmin",
-      "secure": false,
-      "bucket": "cdc-state",
-      "format": "json"
+    "snapshot": {
+      "enabled": true,
+      "format": "json",
+      "include_metadata": true,
+      "compress_files": false
     }
+  },
+  "datasources": {
+    "railway_mysql": {
+      "url": "mysql+pymysql://root:fgeeCC5HFAf2a2eeH4Gf---HhaEA6d33@monorail.proxy.rlwy.net:24497/railway",
+      "type": "mysql"
+    }
+  },
+  "tables": {
+    "homepage_book": {
+      "datasource": "railway_mysql",
+      "schema": "railway",
+      "primary_key": "id",
+      "method": "hash",
+      "hash_columns": ["*"],
+      "snapshot_format": "parquet"
+    }
+  },
+  "storage": {
+    "endpoint": "minio:9000",
+    "access_key": "minioadmin",
+    "secret_key": "minioadmin",
+    "secure": false,
+    "bucket": "cdc-state",
+    "format": "json"
   }
+}

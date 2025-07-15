@@ -79,7 +79,9 @@ services:
       - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - AIRFLOW__WEBSERVER__SECRET_KEY=secret
+      - AIRFLOW__API__SECRET_KEY=secret
+      - AIRFLOW__DATABASE__RETRY_LIMIT=10
+      - AIRFLOW__DATABASE__CONNECT_TIMEOUT=30
     volumes:
       - ./:/opt/airflow  # Mount the entire project directory directly
     ports:
@@ -88,21 +90,21 @@ services:
       bash -c "
       echo 'Waiting for Postgres to be ready...' &&
       while ! pg_isready -h postgres -p 5432 -U airflow; do
-        sleep 2
+        sleep 5
+        echo 'Still waiting for Postgres...'
       done &&
+      echo 'Postgres is ready. Waiting additional time for full initialization...' &&
+      sleep 5 &&
       echo 'Initializing Airflow database...' &&
-      airflow db init &&
-      echo 'Creating admin user...' &&
-      airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
-      echo 'Admin user created successfully!' &&
-      echo 'Starting Airflow scheduler and webserver...' &&
-      airflow scheduler & airflow webserver"
+      airflow db migrate &&
+      echo 'Starting Airflow standalone...' &&
+      exec airflow standalone"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
+      interval: 60s
+      timeout: 30s
       retries: 5
-      start_period: 30s
+      start_period: 90s
     restart: unless-stopped
     networks:
       - airflow-network
